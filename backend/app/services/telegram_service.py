@@ -1,24 +1,30 @@
 import asyncio
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient, errors, utils
 from telethon.tl.types import Channel, Chat, User
 
-from app.config import SESSION_FILE
+from app.config import PENDING_AUTH_TTL_SECONDS, SESSIONS_DIR
 from app.services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramService:
-    def __init__(self, storage: StorageService) -> None:
+    def __init__(self, storage: StorageService, user_id: str) -> None:
         self.storage = storage
+        self.user_id = user_id
+        self.session_dir = SESSIONS_DIR / user_id
+        self.session_file = self.session_dir / "telegram"
         self.client: TelegramClient | None = None
         self._lock = asyncio.Lock()
         self._phone: str | None = None
         self._phone_code_hash: str | None = None
+        self._pending_expires_at: datetime | None = None
         self._last_error: str | None = None
         self._state = "Authentication Required"
 
@@ -35,7 +41,9 @@ class TelegramService:
     async def _create_client(self, settings: dict[str, str]) -> TelegramClient:
         if self.client:
             await self.client.disconnect()
-        self.client = TelegramClient(str(SESSION_FILE), int(settings["api_id"]), settings["api_hash"])
+        self.session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.session_dir, 0o700)
+        self.client = TelegramClient(str(self.session_file), int(settings["api_id"]), settings["api_hash"])
         return self.client
 
     async def rebuild_client(self) -> None:
@@ -53,6 +61,10 @@ class TelegramService:
             raise RuntimeError("Telegram API credentials are not configured.")
         self._state = "Connecting"
         await self.client.connect()
+        for suffix in (".session", ".session-journal"):
+            session_path = Path(str(self.session_file) + suffix)
+            if session_path.exists():
+                os.chmod(session_path, 0o600)
         authorized = await self.client.is_user_authorized()
         self._state = "Connected" if authorized else "Authentication Required"
         self._last_error = None
@@ -90,10 +102,13 @@ class TelegramService:
                 await self.client.connect()
             result = await self.client.send_code_request(phone)
             self._phone, self._phone_code_hash = phone, result.phone_code_hash
+            self._pending_expires_at = datetime.now(timezone.utc) + timedelta(seconds=PENDING_AUTH_TTL_SECONDS)
 
     async def verify_code(self, code: str) -> str:
         async with self._lock:
-            if not self.client or not self._phone or not self._phone_code_hash:
+            if (not self.client or not self._phone or not self._phone_code_hash or
+                    not self._pending_expires_at or self._pending_expires_at <= datetime.now(timezone.utc)):
+                self._clear_login()
                 raise RuntimeError("Request a verification code first.")
             try:
                 await self.client.sign_in(phone=self._phone, code=code, phone_code_hash=self._phone_code_hash)
@@ -105,7 +120,9 @@ class TelegramService:
 
     async def verify_password(self, password: str) -> None:
         async with self._lock:
-            if not self.client:
+            if (not self.client or not self._phone or not self._pending_expires_at or
+                    self._pending_expires_at <= datetime.now(timezone.utc)):
+                self._clear_login()
                 raise RuntimeError("Telegram client is not initialized.")
             await self.client.sign_in(password=password)
             self._clear_login()
@@ -113,9 +130,10 @@ class TelegramService:
 
     def _clear_login(self) -> None:
         self._phone = self._phone_code_hash = None
+        self._pending_expires_at = None
 
     async def dialogs(self) -> list[dict[str, Any]]:
-        self.require_authorized()
+        await self.require_authorized()
         result = []
         async for dialog in self.client.iter_dialogs():  # type: ignore[union-attr]
             entity = dialog.entity
@@ -155,12 +173,14 @@ class TelegramService:
         raise LookupError("The selected destination is unavailable. Refresh destinations and try again.")
 
     async def send_message(self, chat_id: str, message: str) -> None:
-        self.require_authorized()
+        await self.require_authorized()
         await self.client.send_message(int(chat_id), message)  # type: ignore[union-attr]
 
-    def require_authorized(self) -> None:
+    async def require_authorized(self) -> None:
         if not self.client or not self.client.is_connected():
             raise ConnectionError("Telegram is disconnected.")
+        if not await self.client.is_user_authorized():
+            raise PermissionError("Telegram authorization is required.")
 
     async def reconnect(self) -> None:
         async with self._lock:
@@ -186,13 +206,17 @@ class TelegramService:
                     self.client = None
             self._clear_login()
             for suffix in (".session", ".session-journal"):
-                path = Path(str(SESSION_FILE) + suffix)
+                path = Path(str(self.session_file) + suffix)
                 path.unlink(missing_ok=True)
             self._state = "Authentication Required"
 
     async def disconnect(self) -> None:
         if self.client:
             await self.client.disconnect()
+
+    @property
+    def pending_login(self) -> bool:
+        return bool(self._phone and self._pending_expires_at and self._pending_expires_at > datetime.now(timezone.utc))
 
     @staticmethod
     def error_message(exc: Exception) -> str:

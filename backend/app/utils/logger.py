@@ -4,14 +4,21 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import AUDIT_LOG_FILE, LOG_FILE, MAX_LOG_ENTRIES
+from app.config import AUDIT_LOG_FILE, DATA_DIR, LOG_FILE, MAX_LOG_ENTRIES
 
 logger = logging.getLogger("automation")
 
 
 class EventLog:
-    def __init__(self) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
+        self.user_id = user_id
         self.entries: deque[dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
+
+    @property
+    def log_file(self):
+        if not self.user_id:
+            return LOG_FILE
+        return DATA_DIR / "users" / self.user_id / "automation.log"
 
     def add(self, level: str, event: str, message: str, destination: str | None = None,
             error: str | None = None) -> dict[str, Any]:
@@ -19,7 +26,8 @@ class EventLog:
                  "message": message, "destination": destination, "error": error}
         self.entries.append(entry)
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as file:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_file.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as exc:
             logger.warning("Could not append automation log: %s", exc)

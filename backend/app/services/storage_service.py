@@ -7,12 +7,18 @@ from uuid import uuid4
 
 from app.config import MESSAGES_FILE, SETTINGS_FILE, TELEGRAM_API_HASH, TELEGRAM_API_ID
 
+try:
+    import firebase_admin
+    from firebase_admin import db
+except ImportError:
+    firebase_admin = None
+    db = None
+
 
 class StorageService:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._ensure_file(SETTINGS_FILE, {})
-        self._ensure_file(MESSAGES_FILE, [])
 
     @staticmethod
     def _ensure_file(path: Path, default: Any) -> None:
@@ -48,37 +54,62 @@ class StorageService:
         async with self._lock:
             self._write_sync(SETTINGS_FILE, {"api_id": api_id, "api_hash": api_hash})
 
-    async def list_messages(self) -> list[dict[str, str]]:
-        async with self._lock:
-            return self._read_sync(MESSAGES_FILE, [])
+    @property
+    def _firebase(self) -> bool:
+        return bool(firebase_admin and firebase_admin._apps and db)
 
-    async def create_message(self, name: str, content: str) -> dict[str, str]:
+    @staticmethod
+    def _user_file(user_id: str) -> Path:
+        return MESSAGES_FILE.parent / "users" / user_id / "messages.json"
+
+    def _messages_ref(self, user_id: str):
+        return db.reference("users").child(user_id).child("messages")
+
+    def _read_messages(self, user_id: str) -> list[dict[str, str]]:
+        if self._firebase:
+            raw = self._messages_ref(user_id).get() or {}
+            if isinstance(raw, dict):
+                return [{"id": str(key), **value} for key, value in raw.items() if isinstance(value, dict)]
+            return []
+        return self._read_sync(self._user_file(user_id), [])
+
+    def _write_messages(self, user_id: str, items: list[dict[str, str]]) -> None:
+        if self._firebase:
+            self._messages_ref(user_id).set({item["id"]: {"name": item["name"], "content": item["content"]} for item in items})
+        else:
+            self._write_sync(self._user_file(user_id), items)
+
+    async def list_messages(self, user_id: str) -> list[dict[str, str]]:
         async with self._lock:
-            items = self._read_sync(MESSAGES_FILE, [])
+            return self._read_messages(user_id)
+
+    async def create_message(self, user_id: str, name: str, content: str) -> dict[str, str]:
+        async with self._lock:
+            items = self._read_messages(user_id)
             self._assert_unique(items, name)
             item = {"id": str(uuid4()), "name": name, "content": content}
             items.append(item)
-            self._write_sync(MESSAGES_FILE, items)
+            self._write_messages(user_id, items)
             return item
 
-    async def update_message(self, item_id: str, name: str, content: str) -> dict[str, str]:
+    async def update_message(self, user_id: str, item_id: str, name: str, content: str) -> dict[str, str]:
         async with self._lock:
-            items = self._read_sync(MESSAGES_FILE, [])
+            items = self._read_messages(user_id)
             self._assert_unique(items, name, item_id)
             for item in items:
                 if item.get("id") == item_id:
                     item.update(name=name, content=content)
-                    self._write_sync(MESSAGES_FILE, items)
+                    self._write_messages(user_id, items)
                     return item
             raise KeyError("Saved message not found.")
 
-    async def delete_message(self, item_id: str) -> None:
+    async def delete_message(self, user_id: str, item_id: str) -> None:
         async with self._lock:
-            items = self._read_sync(MESSAGES_FILE, [])
+            items = self._read_messages(user_id)
             filtered = [item for item in items if item.get("id") != item_id]
             if len(filtered) == len(items):
                 raise KeyError("Saved message not found.")
-            self._write_sync(MESSAGES_FILE, filtered)
+            self._write_messages(user_id, filtered)
 
     @staticmethod
     def _assert_unique(items: list[dict[str, str]], name: str, exclude_id: str | None = None) -> None:

@@ -1,13 +1,14 @@
 # Tele Automation
 
-Tele Automation is a local-first Telegram automation workspace. It uses your own Telegram user account through Telethon/MTProto, allowing you to select multiple writable groups or channels, compose one message, schedule delivery, and monitor the run from a responsive dashboard.
+Tele Automation is a multi-user Telegram automation workspace. It uses each visitor's own Telegram user account through Telethon/MTProto, with isolated browser identity, Telegram sessions, templates, runtime state, and delivery history.
 
 The project is designed for authorized accounts and communities. It does not bypass Telegram permissions, FloodWait, slow mode, account restrictions, or privacy controls.
 
 ## What is included
 
 - React + Vite responsive homepage and workspace
-- Telegram API ID/API hash setup with OTP and 2FA flow
+- Per-user Telegram OTP/2FA flow and isolated Telethon sessions
+- Opaque server-side application sessions in an HttpOnly cookie
 - Multi-group and multi-channel destination selection
 - Saved message templates and send-once testing
 - Smart scheduling: start time, weekdays, time windows, timezone offset, and message limits
@@ -131,12 +132,12 @@ kill <PID>
 
 1. Open [my.telegram.org](https://my.telegram.org) and choose **API development tools**.
 2. Create an application and copy the numeric API ID and API hash.
-3. In Tele Automation, open **Settings** and save those credentials.
+3. Configure the application-level credentials through environment variables (recommended) or sign into the admin portal before changing them in **Settings**.
 4. Open **Telegram Account**, enter your phone number in international format, for example `+919876543210`.
 5. Enter the Telegram verification code and, if requested, your Telegram cloud password.
-6. The local Telethon session will reconnect on later backend starts while it remains valid.
+6. The user's `backend/sessions/<opaque-user-id>/telegram.session` reconnects lazily on later requests while it remains valid.
 
-OTP and Telegram 2FA values are not persisted by the application.
+OTP and Telegram 2FA values are not persisted. Pending login state is held only in that user's in-memory Telegram context and expires after 15 minutes by default.
 
 ## Automation workflow
 
@@ -177,7 +178,9 @@ Useful endpoints:
 
 | Endpoint                           | Purpose                                                       |
 | ---------------------------------- | ------------------------------------------------------------- |
-| `GET /api/health`                | Telegram state, automation state, persistence backend, uptime |
+| `GET /api/health`                | Infrastructure state and persistence backend only             |
+| `GET /api/me/status`             | Current browser user's Telegram and automation state           |
+| `POST /api/me/logout`            | Invalidate only the current application/browser session        |
 | `GET /api/ready`                 | Readiness check                                               |
 | `GET /api/metrics`               | Runtime counters                                              |
 | `GET /api/telegram/dialogs`      | Writable destination discovery                                |
@@ -198,25 +201,49 @@ curl -X POST http://localhost:8000/api/licenses/validate \
 ## Firebase data layout
 
 ```text
+app_sessions/{sha256_session_token}
+users/{user_id}/messages/{message_id}
+users/{user_id}/runtime/job
+users/{user_id}/runtime/deliveries/{delivery_id}
 license_keys/{record_id}
-runtime/job
-runtime/deliveries/{delivery_id}
 app_config/admin_contact
 ```
 
 When Firebase is not configured, runtime data falls back to:
 
 ```text
-backend/data/automation_job.json
-backend/data/delivery_history.jsonl
+backend/data/app_sessions.json
+backend/data/users/{user_id}/messages.json
+backend/data/users/{user_id}/automation_job.json
+backend/data/users/{user_id}/delivery_history.jsonl
 backend/data/contact.json
 ```
+
+Raw application-session tokens are never persisted; only their SHA-256 digests are stored.
+
+## Existing global Telegram session migration
+
+The application deliberately does not move `backend/sessions/telegram_user.session` automatically because code cannot safely infer its owner. Leave that file backed up until the original owner has opened the updated workspace and `GET /api/me/status` has returned their opaque `user_id`.
+
+With the backend stopped, migrate reversibly on the VPS:
+
+```bash
+cd /opt/teleautomation/backend
+OWNER_USER_ID='replace-with-the-owner-uuid'
+sudo install -d -m 700 "sessions/$OWNER_USER_ID"
+sudo cp -a sessions/telegram_user.session "sessions/$OWNER_USER_ID/telegram.session"
+sudo chmod 600 "sessions/$OWNER_USER_ID/telegram.session"
+```
+
+If `telegram_user.session-journal` exists while the backend is stopped, copy it alongside the database as `telegram.session-journal`. Keep the original files until the owner verifies the migrated account. Rollback is simply stopping the backend, removing the copied per-user files, and retaining/restoring the untouched originals.
 
 ## Security checklist
 
 - Keep `.env`, Firebase service-account JSON, and `backend/sessions/` private.
 - Use a long random `LICENSE_TOKEN_SECRET` and `ADMIN_ACCESS_CODE`.
 - Deploy behind HTTPS and set secure cookies in production.
+- Keep one Uvicorn worker; in-process Telegram clients and automation tasks are intentionally single-process.
+- Set production `CORS_ORIGINS` to explicit trusted origins; credentialed wildcard CORS is not supported.
 - Restrict Firebase Realtime Database rules to the service account/server.
 - Rotate Firebase credentials immediately if a secret is ever committed.
 - Do not expose the admin portal publicly without an additional network or identity-control layer.

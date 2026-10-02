@@ -28,8 +28,10 @@ def parse_datetime(value: Any) -> datetime | None:
 
 
 class AutomationService:
-    def __init__(self, telegram: TelegramService, events: EventLog, runtime: RuntimeStore, licenses: Any) -> None:
+    def __init__(self, telegram: TelegramService, events: EventLog, runtime: RuntimeStore, licenses: Any,
+                 user_id: str = "test-user") -> None:
         self.telegram, self.events, self.runtime, self.licenses = telegram, events, runtime, licenses
+        self.user_id = user_id
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._shutdown_requested = False
@@ -77,7 +79,7 @@ class AutomationService:
                 "max_messages": self.max_messages, "paused": self.paused}
 
     def _persist_job(self) -> None:
-        self.runtime.save_job({
+        self.runtime.save_job(self.user_id, {
             **self.snapshot(),
             "desired_state": self.desired_state,
             "license_record_id": self.license_record_id,
@@ -118,7 +120,7 @@ class AutomationService:
             self.next_send_at = scheduled
             self.state = AutomationState.WAITING if scheduled > utcnow() else AutomationState.RUNNING
             self._persist_job()
-            self._task = asyncio.create_task(self._run(scheduled), name="telegram-automation")
+            self._task = asyncio.create_task(self._run(scheduled), name=f"telegram-automation-{self.user_id}")
             self._persist_job()
             self.events.add("INFO", "automation_started", f"Automation started for {len(dialogs)} destination(s)", self.chat_title)
             return self.snapshot()
@@ -203,14 +205,14 @@ class AutomationService:
                             self.sent_count += 1
                             self.last_error = None
                             self.events.add("SUCCESS", "message_sent", "Message sent", chat_title)
-                            self.runtime.delivery({"timestamp": utcnow().isoformat(), "destination": chat_title, "chat_id": chat_id, "status": "success"})
+                            self.runtime.delivery(self.user_id, {"timestamp": utcnow().isoformat(), "destination": chat_title, "chat_id": chat_id, "status": "success"})
                         except (errors.FloodWaitError, errors.SlowModeWaitError):
                             raise
                         except Exception as exc:
                             self.failed_count += 1
                             self.last_error = self.telegram.error_message(exc)
                             self.events.add("ERROR", "send_failed", self.last_error, chat_title, self.last_error)
-                            self.runtime.delivery({"timestamp": utcnow().isoformat(), "destination": chat_title, "chat_id": chat_id, "status": "failed", "error": self.last_error})
+                            self.runtime.delivery(self.user_id, {"timestamp": utcnow().isoformat(), "destination": chat_title, "chat_id": chat_id, "status": "failed", "error": self.last_error})
                             if isinstance(exc, errors.MessageTooLongError):
                                 self.state = AutomationState.ERROR
                                 self.desired_state = "ERROR"
@@ -240,7 +242,7 @@ class AutomationService:
                     self.next_send_at = scheduled
                     event = "slow_mode" if isinstance(exc, errors.SlowModeWaitError) else "flood_wait"
                     self.events.add("WARNING", event, self.last_error, self.chat_title, self.last_error)
-                    self.runtime.delivery({"timestamp": utcnow().isoformat(), "destination": self.chat_title, "status": "rate_limited", "error": self.last_error, "retry_after": seconds})
+                    self.runtime.delivery(self.user_id, {"timestamp": utcnow().isoformat(), "destination": self.chat_title, "status": "rate_limited", "error": self.last_error, "retry_after": seconds})
                     self._persist_job()
                     await asyncio.sleep(seconds)
                     scheduled = utcnow() + timedelta(seconds=self.interval_seconds or MIN_INTERVAL_SECONDS)
@@ -280,13 +282,13 @@ class AutomationService:
         async with self._lock:
             if self.running:
                 return False
-            job = await asyncio.to_thread(self.runtime.job)
+            job = await asyncio.to_thread(self.runtime.job, self.user_id)
             if not isinstance(job, dict):
                 return False
             if job.get("desired_state") != "RUNNING" or job.get("state") not in {"RUNNING", "WAITING"}:
                 return False
             license_record_id = job.get("license_record_id")
-            if not isinstance(license_record_id, str) or not await self.licenses.validate_record(license_record_id):
+            if not isinstance(license_record_id, str) or not await self.licenses.validate_record(license_record_id, self.user_id):
                 self.events.add("WARNING", "automation_recovery_skipped", "Saved automation license is no longer valid")
                 self.events.audit("automation_recovery_skipped", reason="invalid_license")
                 return False
@@ -331,7 +333,7 @@ class AutomationService:
             self._in_flight = None
             self._shutdown_requested = False
             self._persist_job()
-            self._task = asyncio.create_task(self._run(scheduled), name="telegram-automation")
+            self._task = asyncio.create_task(self._run(scheduled), name=f"telegram-automation-{self.user_id}")
             self._persist_job()
             self.events.add("INFO", "automation_recovered", "Automation safely resumed after restart", self.chat_title)
             self.events.audit("automation_recovered", next_send_at=scheduled.isoformat(), destination_count=len(self.chat_ids))

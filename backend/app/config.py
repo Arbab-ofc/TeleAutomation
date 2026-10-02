@@ -29,7 +29,8 @@ AUDIT_LOG_FILE = DATA_DIR / "audit.log"
 DELIVERY_HISTORY_FILE = DATA_DIR / "delivery_history.jsonl"
 JOB_FILE = DATA_DIR / "automation_job.json"
 CONTACT_FILE = DATA_DIR / "contact.json"
-SESSION_FILE = SESSIONS_DIR / "telegram_user"
+LEGACY_SESSION_FILE = SESSIONS_DIR / "telegram_user"
+APP_SESSIONS_FILE = DATA_DIR / "app_sessions.json"
 ADMIN_ACCESS_CODE = os.getenv("ADMIN_ACCESS_CODE", "").strip()
 ADMIN_TELEGRAM_USERNAME = os.getenv("ADMIN_TELEGRAM_USERNAME", "").strip().lstrip("@")
 LICENSE_TOKEN_SECRET = os.getenv("LICENSE_TOKEN_SECRET", "").strip()
@@ -38,6 +39,9 @@ FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").s
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
 COOKIE_SECURE = env_bool("COOKIE_SECURE", IS_PRODUCTION)
+APP_SESSION_COOKIE = "teleautomation_session"
+APP_SESSION_TTL_SECONDS = env_int("APP_SESSION_TTL_SECONDS", 30 * 24 * 60 * 60, 300)
+PENDING_AUTH_TTL_SECONDS = env_int("PENDING_AUTH_TTL_SECONDS", 15 * 60, 60)
 AUTOMATION_RESUME_ON_START = env_bool("AUTOMATION_RESUME_ON_START", False)
 DELIVERY_RETENTION_ENABLED = env_bool("DELIVERY_RETENTION_ENABLED", False)
 DELIVERY_RETENTION_DAYS = env_int("DELIVERY_RETENTION_DAYS", 90)
@@ -52,7 +56,7 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 _configured_origins = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", "").split(",")
-    if origin.strip()
+    if origin.strip() and origin.strip() != "*"
 ]
 _development_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 CORS_ORIGINS = _configured_origins if IS_PRODUCTION else list(dict.fromkeys(_configured_origins + _development_origins))

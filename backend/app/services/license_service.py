@@ -5,6 +5,7 @@ import json
 import secrets
 import time
 from datetime import date, datetime, time as dt_time, timedelta, timezone
+from threading import Lock
 from typing import Any
 
 from app.config import ADMIN_ACCESS_CODE, ADMIN_TELEGRAM_USERNAME, CONTACT_FILE, FIREBASE_DATABASE_URL, FIREBASE_SERVICE_ACCOUNT_JSON, LICENSE_TOKEN_SECRET
@@ -26,6 +27,7 @@ class LicenseService:
 
     def __init__(self) -> None:
         self._local: dict[str, dict[str, Any]] = {}
+        self._claim_lock = Lock()
         self._firebase = False
         if firebase_admin and FIREBASE_DATABASE_URL and FIREBASE_SERVICE_ACCOUNT_JSON:
             raw = FIREBASE_SERVICE_ACCOUNT_JSON
@@ -141,27 +143,46 @@ class LicenseService:
     async def revoke(self, record_id: str) -> bool:
         return await asyncio.to_thread(self._revoke_sync, record_id)
 
-    def _validate_sync(self, key: str, include_id: bool = False) -> dict[str, Any] | None:
+    def _validate_sync(self, key: str, user_id: str | None = None, include_id: bool = False) -> dict[str, Any] | None:
         self._cleanup_sync()
         digest = self._hash(key)
         now = _now().timestamp()
         for item_id, item in self._read().items():
             starts_at = float(item.get("starts_at", item.get("created_at", 0)))
             if str(item.get("status", "active")) != "revoked" and hmac.compare_digest(str(item.get("key_hash", "")), digest) and starts_at <= now < float(item.get("expires_at", 0)):
+                owner = item.get("claimed_by")
+                if owner and owner != user_id:
+                    continue
+                if user_id and not owner:
+                    if self._firebase:
+                        claimed = self._ref().child(item_id).child("claimed_by").transaction(
+                            lambda current: current or user_id
+                        )
+                        if claimed != user_id:
+                            continue
+                    else:
+                        with self._claim_lock:
+                            records = self._read()
+                            current = records.get(item_id, {})
+                            if current.get("claimed_by") not in (None, user_id):
+                                continue
+                            current["claimed_by"] = user_id
+                            records[item_id] = current
+                            self._write(records)
                 result = {"valid": True, "starts_at": datetime.fromtimestamp(starts_at, timezone.utc).isoformat(), "expires_at": datetime.fromtimestamp(float(item["expires_at"]), timezone.utc).isoformat()}
                 if include_id:
                     result["id"] = item_id
                 return result
         return None
 
-    async def validate(self, key: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._validate_sync, key)
+    async def validate(self, key: str, user_id: str | None = None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._validate_sync, key, user_id)
 
-    async def validate_for_job(self, key: str) -> dict[str, Any] | None:
+    async def validate_for_job(self, key: str, user_id: str) -> dict[str, Any] | None:
         """Validate a raw key once and return its internal record id for safe recovery."""
-        return await asyncio.to_thread(self._validate_sync, key, True)
+        return await asyncio.to_thread(self._validate_sync, key, user_id, True)
 
-    def _validate_record_sync(self, record_id: str) -> bool:
+    def _validate_record_sync(self, record_id: str, user_id: str | None = None) -> bool:
         self._cleanup_sync()
         item = self._read().get(record_id)
         if not item:
@@ -169,10 +190,11 @@ class LicenseService:
         now = _now().timestamp()
         starts_at = float(item.get("starts_at", item.get("created_at", 0)))
         expires_at = float(item.get("expires_at", 0))
-        return str(item.get("status", "active")) != "revoked" and starts_at <= now < expires_at
+        owner = item.get("claimed_by")
+        return str(item.get("status", "active")) != "revoked" and starts_at <= now < expires_at and (not owner or owner == user_id)
 
-    async def validate_record(self, record_id: str) -> bool:
-        return await asyncio.to_thread(self._validate_record_sync, record_id)
+    async def validate_record(self, record_id: str, user_id: str | None = None) -> bool:
+        return await asyncio.to_thread(self._validate_record_sync, record_id, user_id)
 
     def admin_token(self) -> str:
         expires = int(time.time()) + 3600
@@ -181,6 +203,8 @@ class LicenseService:
         return f"{payload}:{signature}"
 
     def verify_admin_token(self, token: str) -> bool:
+        if not LICENSE_TOKEN_SECRET:
+            return False
         try:
             role, raw_expiry, signature = token.split(":", 2)
             payload = f"{role}:{raw_expiry}"

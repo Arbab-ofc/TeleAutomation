@@ -24,4 +24,6 @@ backend/data/audit.log
 backend/data/delivery_history.jsonl
 backend/data/automation_job.json
 backend/data/contact.json
+backend/data/app_sessions.json
+backend/data/users/
 backend/data/*.tmp

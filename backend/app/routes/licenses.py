@@ -1,10 +1,12 @@
 import json
 
-from fastapi import APIRouter, Cookie, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from app.models.schemas import AdminContact, AdminVerify, LicenseCreate, LicenseValidate
 from app.config import COOKIE_SECURE
+from app.dependencies import get_current_user, require_same_origin
+from app.services.app_session_service import AppUser
 
 router = APIRouter(prefix="/licenses", tags=["licenses"])
 
@@ -22,7 +24,7 @@ def _limit(request: Request, key: str, limit: int = 30) -> None:
 
 
 @router.post("/admin/verify")
-async def verify_admin(payload: AdminVerify, request: Request, response: Response):
+async def verify_admin(payload: AdminVerify, request: Request, response: Response, _: None = Depends(require_same_origin)):
     _limit(request, "admin-verify", 5)
     token = request.app.state.licenses.verify_admin_code(payload.code)
     if not token:
@@ -37,7 +39,7 @@ async def verify_admin(payload: AdminVerify, request: Request, response: Respons
 
 
 @router.post("/admin/generate")
-async def generate(request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None)):
+async def generate(request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None), _: None = Depends(require_same_origin)):
     _limit(request, "admin-generate")
     _admin(request, authorization, admin_session)
     try:
@@ -62,7 +64,7 @@ async def list_licenses(request: Request, authorization: str | None = Header(def
 
 
 @router.delete("/admin/{record_id}")
-async def revoke(record_id: str, request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None)):
+async def revoke(record_id: str, request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None), _: None = Depends(require_same_origin)):
     _limit(request, "admin-revoke")
     _admin(request, authorization, admin_session)
     if not await request.app.state.licenses.revoke(record_id):
@@ -79,16 +81,16 @@ async def audit(request: Request, limit: int = 100, authorization: str | None = 
 
 
 @router.post("/validate")
-async def validate(payload: LicenseValidate, request: Request):
+async def validate(payload: LicenseValidate, request: Request, user: AppUser = Depends(get_current_user), _: None = Depends(require_same_origin)):
     _limit(request, "license-validate", 30)
-    result = await request.app.state.licenses.validate(payload.key)
+    result = await request.app.state.licenses.validate(payload.key, user.id)
     if not result:
         raise HTTPException(403, "License key is invalid or expired.")
     return result
 
 
 @router.post("/admin/logout")
-async def logout(response: Response):
+async def logout(response: Response, _: None = Depends(require_same_origin)):
     response.delete_cookie(
         "admin_session", path="/", httponly=True,
         secure=COOKIE_SECURE, samesite="lax",
@@ -102,7 +104,7 @@ async def contact(request: Request):
 
 
 @router.put("/admin/contact")
-async def update_contact(payload: AdminContact, request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None)):
+async def update_contact(payload: AdminContact, request: Request, authorization: str | None = Header(default=None), admin_session: str | None = Cookie(default=None), _: None = Depends(require_same_origin)):
     _limit(request, "admin-contact")
     _admin(request, authorization, admin_session)
     username = request.app.state.licenses.set_admin_contact(payload.telegram_username)

@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from app.services.automation_service import AutomationService
 from app.services.runtime_store import RuntimeStore
-import app.services.runtime_store as runtime_store_module
 
 
 def now() -> datetime:
@@ -21,14 +20,14 @@ class FakeRuntime:
         self.saved_jobs = []
         self.delivery_items = []
 
-    def save_job(self, snapshot):
+    def save_job(self, user_id, snapshot):
         self.saved_job = dict(snapshot)
         self.saved_jobs.append(dict(snapshot))
 
-    def job(self):
+    def job(self, user_id):
         return self.saved_job
 
-    def delivery(self, item):
+    def delivery(self, user_id, item):
         self.delivery_items.append(dict(item))
 
 
@@ -68,7 +67,7 @@ class FakeLicenses:
     def __init__(self, valid=True):
         self.valid = valid
 
-    async def validate_record(self, record_id):
+    async def validate_record(self, record_id, user_id=None):
         return self.valid and record_id == "license-record"
 
 
@@ -184,8 +183,8 @@ class DeliveryRetentionTests(unittest.TestCase):
             store = RuntimeStore()
             store._firebase = False
 
-            with patch.object(runtime_store_module, "DELIVERY_HISTORY_FILE", history):
-                removed = store.cleanup_deliveries(days=30, max_records=2)
+            with patch.object(store, "_delivery_file", return_value=history):
+                removed = store.cleanup_deliveries("test-user", days=30, max_records=2)
 
             retained = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(2, removed)
