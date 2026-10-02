@@ -159,11 +159,13 @@ Open the homepage and choose the admin portal, or visit `/#admin`.
 
 1. Enter the `ADMIN_ACCESS_CODE` from `backend/.env`.
 2. Generate a key by duration or exact date range.
-3. Copy the key immediately—the raw key is shown only once.
+3. Copy the key from either the generation result or the protected license list. New keys are encrypted at rest using `LICENSE_TOKEN_SECRET`.
 4. Revoke/delete keys from the license list when needed.
 5. Set the buyer Telegram username in the **Buyer contact** field. Pricing buttons open that account with a prefilled message; the user manually presses Telegram’s Send button.
 
 License records are stored under Firebase `license_keys` when Firebase is enabled. Expired and revoked/deleted records are removed from the active database. Admin actions are retained in `backend/data/audit.log` locally or can be forwarded to your deployment logging system.
+
+Licenses created before encrypted-key storage was introduced contain only a one-way hash. Their original digits cannot be recovered, so the admin list marks them as legacy keys; revoke and regenerate those keys if they must be displayed again. Keep `LICENSE_TOKEN_SECRET` stable across deployments or stored encrypted keys will no longer be displayable, although hash-based license validation will continue to work.
 
 ## API documentation
 

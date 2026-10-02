@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -7,6 +8,8 @@ import time
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from threading import Lock
 from typing import Any
+
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import ADMIN_ACCESS_CODE, ADMIN_TELEGRAM_USERNAME, CONTACT_FILE, FIREBASE_DATABASE_URL, FIREBASE_SERVICE_ACCOUNT_JSON, LICENSE_TOKEN_SECRET
 
@@ -44,6 +47,27 @@ class LicenseService:
     @staticmethod
     def _hash(value: str) -> str:
         return hashlib.sha256(value.encode()).hexdigest()
+
+    @staticmethod
+    def _cipher() -> Fernet:
+        if not LICENSE_TOKEN_SECRET:
+            raise RuntimeError("LICENSE_TOKEN_SECRET is required to protect license keys.")
+        derived = hashlib.sha256(LICENSE_TOKEN_SECRET.encode("utf-8")).digest()
+        return Fernet(base64.urlsafe_b64encode(derived))
+
+    @classmethod
+    def _encrypt_key(cls, value: str) -> str:
+        return cls._cipher().encrypt(value.encode("utf-8")).decode("ascii")
+
+    @classmethod
+    def _decrypt_key(cls, value: Any) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            key = cls._cipher().decrypt(value.encode("ascii")).decode("utf-8")
+            return key if len(key) == 12 and key.isdigit() else None
+        except (InvalidToken, ValueError, RuntimeError):
+            return None
 
     def _ref(self):
         return db.reference("license_keys")
@@ -91,7 +115,7 @@ class LicenseService:
         created = _now()
         starts = datetime.combine(start_date, dt_time.min, tzinfo=timezone.utc) if start_date else created
         expires = (datetime.combine(end_date + timedelta(days=1), dt_time.min, tzinfo=timezone.utc) - timedelta(microseconds=1)) if end_date else starts + timedelta(**{duration_unit: duration_value})
-        record = {"key_hash": self._hash(key), "created_at": created.timestamp(), "starts_at": starts.timestamp(), "expires_at": expires.timestamp(), "duration_value": duration_value, "duration_unit": duration_unit, "start_date": start_date.isoformat() if start_date else None, "end_date": end_date.isoformat() if end_date else None, "used": False, "status": "active", "revoked_at": None}
+        record = {"key_hash": self._hash(key), "key_encrypted": self._encrypt_key(key), "created_at": created.timestamp(), "starts_at": starts.timestamp(), "expires_at": expires.timestamp(), "duration_value": duration_value, "duration_unit": duration_unit, "start_date": start_date.isoformat() if start_date else None, "end_date": end_date.isoformat() if end_date else None, "used": False, "status": "active", "revoked_at": None}
         if self._firebase:
             item_id = self._ref().push().key
         else:
@@ -123,7 +147,8 @@ class LicenseService:
                 status = "scheduled"
             elif status != "revoked" and now >= expires:
                 status = "expired"
-            result.append({"id": item_id, "key_hint": str(item.get("key_hash", ""))[-6:], "starts_at": datetime.fromtimestamp(starts, timezone.utc).isoformat(), "expires_at": datetime.fromtimestamp(expires, timezone.utc).isoformat(), "active": status == "active" and starts <= now < expires, "status": status, "revoked_at": item.get("revoked_at"), "duration_value": item.get("duration_value"), "duration_unit": item.get("duration_unit"), "start_date": item.get("start_date"), "end_date": item.get("end_date")})
+            key = self._decrypt_key(item.get("key_encrypted"))
+            result.append({"id": item_id, "key": key, "key_hint": key[-6:] if key else None, "starts_at": datetime.fromtimestamp(starts, timezone.utc).isoformat(), "expires_at": datetime.fromtimestamp(expires, timezone.utc).isoformat(), "active": status == "active" and starts <= now < expires, "status": status, "revoked_at": item.get("revoked_at"), "duration_value": item.get("duration_value"), "duration_unit": item.get("duration_unit"), "start_date": item.get("start_date"), "end_date": item.get("end_date")})
         return sorted(result, key=lambda item: item["expires_at"])
 
     async def list(self) -> list[dict[str, Any]]:

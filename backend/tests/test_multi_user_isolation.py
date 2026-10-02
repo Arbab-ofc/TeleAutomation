@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 from uuid import UUID, uuid4
@@ -11,6 +12,7 @@ from app.main import health
 from app.services.app_session_service import AppSessionService
 from app.services.automation_service import AutomationService
 from app.services.runtime_store import RuntimeStore
+from app.services.license_service import LicenseService
 from app.services.storage_service import StorageService
 from app.services.telegram_service import TelegramService
 from app.services.telegram_manager import TelegramClientManager
@@ -237,6 +239,34 @@ class FirebasePathAndHealthTests(unittest.TestCase):
         self.assertTrue(result["telegram_configured"])
         self.assertNotIn("telegram", result)
         self.assertNotIn("automation", result)
+
+
+class LicenseDisplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_license_is_encrypted_at_rest_and_admin_can_list_real_key(self):
+        service = LicenseService.__new__(LicenseService)
+        service._local = {}
+        service._firebase = False
+        service._claim_lock = Lock()
+        with patch("app.services.license_service.LICENSE_TOKEN_SECRET", "test-secret-with-enough-entropy"):
+            created = await service.generate(1, "days")
+            stored = next(iter(service._local.values()))
+            self.assertNotIn(created["key"], str(stored))
+            self.assertNotEqual(created["key"], stored["key_encrypted"])
+            listed = await service.list()
+        self.assertEqual(created["key"], listed[0]["key"])
+        self.assertEqual(created["key"][-6:], listed[0]["key_hint"])
+
+    async def test_legacy_hash_only_license_is_reported_as_unavailable(self):
+        service = LicenseService.__new__(LicenseService)
+        service._firebase = False
+        service._claim_lock = Lock()
+        now = datetime.now(timezone.utc).timestamp()
+        service._local = {"legacy": {"key_hash": "a" * 64, "created_at": now,
+                                      "starts_at": now, "expires_at": now + 3600}}
+        with patch("app.services.license_service.LICENSE_TOKEN_SECRET", "test-secret"):
+            listed = await service.list()
+        self.assertIsNone(listed[0]["key"])
+        self.assertIsNone(listed[0]["key_hint"])
 
 
 if __name__ == "__main__":
